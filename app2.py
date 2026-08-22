@@ -1,5 +1,6 @@
 import streamlit as st
 import pandas as pd
+import sqlite3
 from datetime import datetime, date
 from database import init_db, create_user, authenticate_user, get_user, update_profile
 from database import get_subjects, add_subject, update_subject, delete_subject
@@ -20,6 +21,8 @@ init_db()
 # --- Session State Initializations ---
 if "user_id" not in st.session_state:
     st.session_state.user_id = None
+if "is_admin" not in st.session_state:
+    st.session_state.is_admin = False
 if "page" not in st.session_state:
     st.session_state.page = "Dashboard"
 if "lecture_logs" not in st.session_state:
@@ -142,12 +145,13 @@ def go(page):
 
 def logout():
     st.session_state.user_id = None
+    st.session_state.is_admin = False
     st.session_state.page = "Dashboard"
     st.rerun()
 
 
-# ---------- Auth ----------
-if st.session_state.user_id is None:
+# ---------- Auth / Login ----------
+if st.session_state.user_id is None and not st.session_state.is_admin:
     st.markdown("""
     <div class="hero">
         <div class="brand">🎓 CA COMPASS</div>
@@ -163,13 +167,21 @@ if st.session_state.user_id is None:
             username = st.text_input("Login ID")
             password = st.text_input("Password", type="password")
             submitted = st.form_submit_button("Enter CA Compass", use_container_width=True)
+            
             if submitted:
-                user_id = authenticate_user(username.strip(), password)
-                if user_id:
-                    st.session_state.user_id = user_id
+                # --- SECRET ADMIN GATEWAY ---
+                # Change "boss" and "mysecret123" to your actual desired login!
+                if username.strip() == "boss" and password == "mysecret123":
+                    st.session_state.is_admin = True
                     st.rerun()
                 else:
-                    st.error("Invalid Login ID or password.")
+                    # Normal Student Login
+                    user_id = authenticate_user(username.strip(), password)
+                    if user_id:
+                        st.session_state.user_id = user_id
+                        st.rerun()
+                    else:
+                        st.error("Invalid Login ID or password.")
 
     with tab2:
         with st.form("signup"):
@@ -191,6 +203,9 @@ if st.session_state.user_id is None:
                     st.error("Password should contain at least 6 characters.")
                 elif password != confirm:
                     st.error("Passwords do not match.")
+                # Prevent users from taking the admin username
+                elif username.strip() == "boss":
+                    st.error("This username is reserved.")
                 else:
                     try:
                         uid = create_user(name.strip(), username.strip(), hash_password(password), attempt, articleship)
@@ -203,7 +218,51 @@ if st.session_state.user_id is None:
     st.stop()
 
 
-# ---------- Logged in ----------
+# ---------- SECRET ADMIN DASHBOARD ----------
+if st.session_state.is_admin:
+    st.markdown('<div class="hero"><h1>👑 Master Admin Dashboard</h1><p>Welcome to the command center. View all user data here.</p></div>', unsafe_allow_html=True)
+    
+    if st.button("🚪 Logout Admin", type="primary"):
+        logout()
+        
+    conn = sqlite3.connect("ca_compass.db")
+    
+    st.subheader("👥 Registered Users")
+    df_users = pd.read_sql_query("SELECT id, name, username, attempt, articleship FROM users", conn)
+    st.dataframe(df_users, use_container_width=True, hide_index=True)
+    
+    st.divider()
+    
+    st.subheader("🏆 Global Study Leaderboard")
+    leaderboard_query = """
+        SELECT u.name as Student, u.username as User_ID, SUM(s.minutes)/60.0 as Total_Hours
+        FROM users u
+        LEFT JOIN study_sessions s ON u.id = s.user_id
+        GROUP BY u.id
+        ORDER BY Total_Hours DESC
+    """
+    df_leaderboard = pd.read_sql_query(leaderboard_query, conn)
+    df_leaderboard['Total_Hours'] = df_leaderboard['Total_Hours'].fillna(0).round(1)
+    st.dataframe(df_leaderboard, use_container_width=True, hide_index=True)
+    
+    st.divider()
+    
+    st.subheader("📋 Master Study & Lecture Logs")
+    logs_query = """
+        SELECT u.name as Student, s.date as Date, s.subject as Subject, 
+               s.session_type as Type, s.minutes as Minutes_Studied
+        FROM study_sessions s
+        JOIN users u ON s.user_id = u.id
+        ORDER BY s.date DESC
+    """
+    df_all_sessions = pd.read_sql_query(logs_query, conn)
+    st.dataframe(df_all_sessions, use_container_width=True, hide_index=True)
+    
+    conn.close()
+    st.stop() # Stops the rest of the app from loading so normal tabs don't show up
+
+
+# ---------- NORMAL USER FLOW (Students Only) ----------
 user = get_user(st.session_state.user_id)
 if not user:
     logout()
@@ -215,6 +274,7 @@ with st.sidebar:
     st.caption(f"Welcome, {user['name']}")
     st.caption(f"Attempt: {user['attempt']}")
 
+    # Notice there is NO admin button here!
     pages = [
         ("🏠", "Dashboard"),
         ("📚", "Subjects & Chapters"),
@@ -266,7 +326,6 @@ if st.session_state.page == "Dashboard":
     </div>
     """, unsafe_allow_html=True)
 
-    # Phase Tracker (Articleship vs Dedicated Study)
     if user.get("articleship"):
         st.info("🏢 **Articleship Active:** Balance is key. Aim for 3-4 consistent hours of study daily alongside office work.")
     else:
@@ -389,10 +448,8 @@ elif st.session_state.page == "Daily Lectures":
                 minutes = int(study_hours * 60)
                 log_title = f"{subject_studied} ({session_time} Lecture)"
                 
-                # Update main database study sessions
                 add_study_session(user["id"], log_title, minutes, "Lecture")
                 
-                # Save to session log table
                 new_log = {
                     "Date": date.today().strftime("%Y-%m-%d"),
                     "Time": session_time.split()[0],
@@ -401,9 +458,8 @@ elif st.session_state.page == "Daily Lectures":
                     "Key Points": imp_points if imp_points else "-",
                     "Imp Qs": imp_questions if imp_questions else "-"
                 }
-                st.session_state.lecture_logs.insert(0, new_log) # Add to top
+                st.session_state.lecture_logs.insert(0, new_log) 
 
-                # Add to pending homework if exists
                 if homework_qs.strip():
                     st.session_state.pending_homework.append({
                         "id": str(datetime.now().timestamp()),
@@ -419,7 +475,6 @@ elif st.session_state.page == "Daily Lectures":
 
     st.divider()
     
-    # Homework Section
     if st.session_state.pending_homework:
         st.subheader("📝 Pending Homework")
         st.caption("Complete these tasks during your post-articleship self-study session.")
@@ -437,7 +492,7 @@ elif st.session_state.page == "Daily Lectures":
                 with hw_col1:
                     hw_mins = st.number_input("Minutes spent on HW", min_value=15, step=15, value=45, key=f"time_{hw['id']}")
                 with hw_col2:
-                    st.write("") # Spacer
+                    st.write("") 
                     st.write("")
                     if st.button("✅ Mark Completed & Claim XP", key=f"btn_{hw['id']}"):
                         add_study_session(user["id"], f"Homework: {hw['subject']}", hw_mins, "Self Study")
@@ -445,7 +500,6 @@ elif st.session_state.page == "Daily Lectures":
                         st.success(f"Homework completed! Earned XP for {hw_mins} minutes.")
                         st.rerun()
 
-    # Log Table
     st.subheader("📋 Lecture History")
     if st.session_state.lecture_logs:
         df_logs = pd.DataFrame(st.session_state.lecture_logs)
