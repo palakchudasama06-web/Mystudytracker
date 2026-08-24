@@ -3,9 +3,8 @@ from datetime import datetime, date, timedelta
 from supabase import create_client, Client
 
 # --- SUPABASE CREDENTIALS ---
-# Replace these with your actual Supabase project credentials
-SUPABASE_URL = "YOUR_SUPABASE_PROJECT_URL"
-SUPABASE_KEY = "YOUR_SUPABASE_ANON_KEY"
+SUPABASE_URL = "https://ryswgudzkbabjuiofrne.supabase.co"
+SUPABASE_KEY = "PASTE_YOUR_COPIED_ANON_KEY_HERE"
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
