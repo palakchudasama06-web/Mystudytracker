@@ -1,317 +1,192 @@
-import sqlite3
-from pathlib import Path
+import os
 from datetime import datetime, date, timedelta
-from utils import verify_password
+from supabase import create_client, Client
 
-DB_PATH = Path(__file__).parent / "ca_compass.db"
+# --- SUPABASE CREDENTIALS ---
+# Replace these with your actual Supabase project credentials
+SUPABASE_URL = "YOUR_SUPABASE_PROJECT_URL"
+SUPABASE_KEY = "YOUR_SUPABASE_ANON_KEY"
 
-
-def conn():
-    c = sqlite3.connect(DB_PATH)
-    c.row_factory = sqlite3.Row
-    return c
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 
 def init_db():
-    c = conn()
-    cur = c.cursor()
+    # Tables are initialized directly in the Supabase SQL Editor
+    pass
 
-    cur.executescript("""
-    CREATE TABLE IF NOT EXISTS users (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        name TEXT NOT NULL,
-        username TEXT UNIQUE NOT NULL,
-        password_hash TEXT NOT NULL,
-        attempt TEXT NOT NULL,
-        articleship INTEGER DEFAULT 0,
-        xp INTEGER DEFAULT 0,
-        created_at TEXT NOT NULL
-    );
 
-    CREATE TABLE IF NOT EXISTS subjects (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER NOT NULL,
-        name TEXT NOT NULL,
-        progress REAL DEFAULT 0,
-        daily_target_minutes INTEGER DEFAULT 45,
-        FOREIGN KEY(user_id) REFERENCES users(id)
-    );
-
-    CREATE TABLE IF NOT EXISTS chapters (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        subject_id INTEGER NOT NULL,
-        name TEXT NOT NULL,
-        progress REAL DEFAULT 0,
-        completed INTEGER DEFAULT 0,
-        FOREIGN KEY(subject_id) REFERENCES subjects(id)
-    );
-
-    CREATE TABLE IF NOT EXISTS study_sessions (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER NOT NULL,
-        subject TEXT NOT NULL,
-        minutes INTEGER NOT NULL,
-        session_type TEXT NOT NULL,
-        date TEXT NOT NULL,
-        created_at TEXT NOT NULL
-    );
-
-    CREATE TABLE IF NOT EXISTS revisions (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER NOT NULL,
-        chapter_id INTEGER NOT NULL,
-        chapter_name TEXT NOT NULL,
-        revision_type TEXT NOT NULL,
-        due_date TEXT NOT NULL,
-        completed INTEGER DEFAULT 0,
-        FOREIGN KEY(user_id) REFERENCES users(id)
-    );
-    """)
-
-    c.commit()
-    c.close()
-
+# ---------- User Authentication ----------
 
 def create_user(name, username, password_hash, attempt, articleship):
-    c = conn()
-    try:
-        cur = c.execute(
-            """INSERT INTO users(name,username,password_hash,attempt,articleship,created_at)
-               VALUES(?,?,?,?,?,?)""",
-            (name, username, password_hash, attempt, int(articleship), datetime.now().isoformat())
-        )
-        c.commit()
-        return cur.lastrowid
-    except sqlite3.IntegrityError:
-        raise ValueError("That Login ID is already taken.")
-    finally:
-        c.close()
+    data = {
+        "name": name,
+        "username": username,
+        "password_hash": password_hash,
+        "attempt": attempt,
+        "articleship": articleship
+    }
+    response = supabase.table("users").insert(data).execute()
+    if not response.data:
+        raise ValueError("Failed to create user. Login ID might already exist.")
+    return response.data[0]["id"]
 
 
-def authenticate_user(username, password):
-    c = conn()
-    row = c.execute("SELECT id,password_hash FROM users WHERE username=?", (username,)).fetchone()
-    c.close()
-    if row and verify_password(password, row["password_hash"]):
-        return row["id"]
+def authenticate_user(username, raw_password):
+    from utils import verify_password
+    response = supabase.table("users").select("*").eq("username", username).execute()
+    if response.data:
+        user = response.data[0]
+        if verify_password(raw_password, user["password_hash"]):
+            return user["id"]
     return None
 
 
 def get_user(user_id):
-    c = conn()
-    row = c.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
-    c.close()
-    return dict(row) if row else None
+    if not user_id:
+        return None
+    response = supabase.table("users").select("*").eq("id", user_id).execute()
+    return response.data[0] if response.data else None
 
 
 def update_profile(user_id, name, attempt, articleship):
-    c = conn()
-    c.execute(
-        "UPDATE users SET name=?, attempt=?, articleship=? WHERE id=?",
-        (name, attempt, int(articleship), user_id)
-    )
-    c.commit()
-    c.close()
+    supabase.table("users").update({
+        "name": name,
+        "attempt": attempt,
+        "articleship": articleship
+    }).eq("id", user_id).execute()
 
+
+# ---------- Subjects & Chapters ----------
 
 def get_subjects(user_id):
-    c = conn()
-    rows = c.execute(
-        "SELECT * FROM subjects WHERE user_id=? ORDER BY id", (user_id,)
-    ).fetchall()
-    c.close()
-    return [dict(x) for x in rows]
+    response = supabase.table("subjects").select("*").eq("user_id", user_id).execute()
+    return response.data or []
 
 
 def add_subject(user_id, name, daily_target):
-    c = conn()
-    c.execute(
-        "INSERT INTO subjects(user_id,name,daily_target_minutes) VALUES(?,?,?)",
-        (user_id, name, daily_target)
-    )
-    c.commit()
-    c.close()
+    supabase.table("subjects").insert({
+        "user_id": user_id,
+        "name": name,
+        "daily_target_minutes": daily_target,
+        "progress": 0
+    }).execute()
 
 
 def update_subject(subject_id, progress, daily_target):
-    c = conn()
-    c.execute(
-        "UPDATE subjects SET progress=?, daily_target_minutes=? WHERE id=?",
-        (progress, daily_target, subject_id)
-    )
-    c.commit()
-    c.close()
+    supabase.table("subjects").update({
+        "progress": progress,
+        "daily_target_minutes": daily_target
+    }).eq("id", subject_id).execute()
 
 
 def delete_subject(subject_id):
-    c = conn()
-    c.execute("DELETE FROM chapters WHERE subject_id=?", (subject_id,))
-    c.execute("DELETE FROM subjects WHERE id=?", (subject_id,))
-    c.commit()
-    c.close()
+    supabase.table("subjects").delete().eq("id", subject_id).execute()
 
 
 def get_chapters(subject_id):
-    c = conn()
-    rows = c.execute(
-        "SELECT * FROM chapters WHERE subject_id=? ORDER BY id", (subject_id,)
-    ).fetchall()
-    c.close()
-    return [dict(x) for x in rows]
+    response = supabase.table("chapters").select("*").eq("subject_id", subject_id).execute()
+    return response.data or []
 
 
 def add_chapter(subject_id, name):
-    c = conn()
-    c.execute("INSERT INTO chapters(subject_id,name) VALUES(?,?)", (subject_id, name))
-    c.commit()
-    c.close()
+    supabase.table("chapters").insert({
+        "subject_id": subject_id,
+        "name": name,
+        "progress": 0
+    }).execute()
 
 
-def update_chapter(chapter_id, progress, completed):
-    c = conn()
-    c.execute(
-        "UPDATE chapters SET progress=?, completed=? WHERE id=?",
-        (progress, int(completed), chapter_id)
-    )
-    c.commit()
-    c.close()
+def update_chapter(chapter_id, progress):
+    supabase.table("chapters").update({"progress": progress}).eq("id", chapter_id).execute()
 
 
 def delete_chapter(chapter_id):
-    c = conn()
-    c.execute("DELETE FROM chapters WHERE id=?", (chapter_id,))
-    c.commit()
-    c.close()
+    supabase.table("chapters").delete().eq("id", chapter_id).execute()
 
+
+# ---------- Study Sessions & Analytics ----------
 
 def add_study_session(user_id, subject, minutes, session_type):
-    c = conn()
-    now = datetime.now()
-    c.execute(
-        """INSERT INTO study_sessions(user_id,subject,minutes,session_type,date,created_at)
-           VALUES(?,?,?,?,?,?)""",
-        (user_id, subject, int(minutes), session_type, now.date().isoformat(), now.isoformat())
-    )
-    xp = int(minutes) * 2
-    c.execute("UPDATE users SET xp=xp+? WHERE id=?", (xp, user_id))
-    c.commit()
-    c.close()
+    today_str = date.today().isoformat()
+    supabase.table("study_sessions").insert({
+        "user_id": user_id,
+        "subject": subject,
+        "minutes": minutes,
+        "session_type": session_type,
+        "date": today_str
+    }).execute()
 
 
-def get_study_sessions(user_id, limit=100):
-    c = conn()
-    rows = c.execute(
-        """SELECT * FROM study_sessions WHERE user_id=?
-           ORDER BY created_at DESC LIMIT ?""",
-        (user_id, limit)
-    ).fetchall()
-    c.close()
-    return [dict(x) for x in rows]
+def get_study_sessions(user_id, limit=500):
+    response = supabase.table("study_sessions").select("*").eq("user_id", user_id).order("date", desc=True).limit(limit).execute()
+    return response.data or []
 
 
 def get_daily_minutes(user_id):
-    c = conn()
-    today = date.today()
-    values = {}
+    today_str = date.today().isoformat()
+    week_ago = (date.today() - timedelta(days=7)).isoformat()
+    month_ago = (date.today() - timedelta(days=30)).isoformat()
 
-    for key, start in {
-        "today": today,
-        "week": today - timedelta(days=6),
-        "month": today - timedelta(days=29),
-    }.items():
-        row = c.execute(
-            "SELECT COALESCE(SUM(minutes),0) total FROM study_sessions WHERE user_id=? AND date>=?",
-            (user_id, start.isoformat())
-        ).fetchone()
-        values[key] = int(row["total"])
+    sessions = get_study_sessions(user_id, limit=1000)
 
-    c.close()
-    return values
+    today_mins = sum(s["minutes"] for s in sessions if s["date"] == today_str)
+    week_mins = sum(s["minutes"] for s in sessions if s["date"] >= week_ago)
+    month_mins = sum(s["minutes"] for s in sessions if s["date"] >= month_ago)
 
-
-def calculate_streak(user_id):
-    c = conn()
-    rows = c.execute(
-        "SELECT DISTINCT date FROM study_sessions WHERE user_id=? ORDER BY date DESC",
-        (user_id,)
-    ).fetchall()
-    c.close()
-
-    dates = {date.fromisoformat(r["date"]) for r in rows}
-    if not dates:
-        return 0
-
-    today = date.today()
-    current = today if today in dates else today - timedelta(days=1)
-    streak = 0
-
-    while current in dates:
-        streak += 1
-        current -= timedelta(days=1)
-
-    return streak
+    return {"today": today_mins, "week": week_mins, "month": month_mins}
 
 
 def get_stats(user_id):
-    c = conn()
-    row = c.execute(
-        "SELECT COALESCE(xp,0) xp FROM users WHERE id=?", (user_id,)
-    ).fetchone()
-    total = c.execute(
-        "SELECT COALESCE(SUM(minutes),0) total FROM study_sessions WHERE user_id=?",
-        (user_id,)
-    ).fetchone()
-    c.close()
+    sessions = get_study_sessions(user_id, limit=2000)
+    total_minutes = sum(s["minutes"] for s in sessions)
+    xp = int(total_minutes * 1.5)
 
-    return {
-        "xp": int(row["xp"]),
-        "total_minutes": int(total["total"]),
-        "streak": calculate_streak(user_id),
-    }
+    # Calculate streak
+    unique_dates = sorted(list(set(s["date"] for s in sessions)), reverse=True)
+    streak = 0
+    check_date = date.today()
 
+    for d_str in unique_dates:
+        d = datetime.strptime(d_str, "%Y-%m-%d").date()
+        if d == check_date:
+            streak += 1
+            check_date -= timedelta(days=1)
+        elif d == check_date - timedelta(days=1):
+            streak += 1
+            check_date = d - timedelta(days=1)
+        else:
+            break
+
+    return {"total_minutes": total_minutes, "xp": xp, "streak": streak}
+
+
+# ---------- Revisions ----------
 
 def add_revision(chapter_id, revision_type):
-    offsets = {
-        "24 Hours": 1,
-        "7 Days": 7,
-        "21 Days": 21,
-        "45 Days": 45,
-        "Final Revision": 90,
-    }
-    c = conn()
-    ch = c.execute("SELECT name, subject_id FROM chapters WHERE id=?", (chapter_id,)).fetchone()
-    if not ch:
-        c.close()
-        return
+    offset_days = {"24 Hours": 1, "7 Days": 7, "21 Days": 21, "45 Days": 45, "Final Revision": 60}.get(revision_type, 1)
+    due = (date.today() + timedelta(days=offset_days)).isoformat()
 
-    user = c.execute(
-        "SELECT user_id FROM subjects WHERE id=?", (ch["subject_id"],)
-    ).fetchone()
-
-    due = date.today() + timedelta(days=offsets.get(revision_type, 7))
-    c.execute(
-        """INSERT INTO revisions(user_id,chapter_id,chapter_name,revision_type,due_date)
-           VALUES(?,?,?,?,?)""",
-        (user["user_id"], chapter_id, ch["name"], revision_type, due.isoformat())
-    )
-    c.commit()
-    c.close()
+    supabase.table("revisions").insert({
+        "chapter_id": chapter_id,
+        "revision_type": revision_type,
+        "due_date": due,
+        "completed": False
+    }).execute()
 
 
 def get_due_revisions(user_id):
-    c = conn()
-    rows = c.execute(
-        """SELECT * FROM revisions
-           WHERE user_id=? AND completed=0 AND due_date<=?
-           ORDER BY due_date""",
-        (user_id, date.today().isoformat())
-    ).fetchall()
-    c.close()
-    return [dict(x) for x in rows]
+    response = supabase.table("revisions").select("*, chapters!inner(name, subject_id, subjects!inner(user_id))").eq("completed", False).eq("chapters.subjects.user_id", user_id).execute()
+    revisions = []
+    if response.data:
+        for row in response.data:
+            revisions.append({
+                "id": row["id"],
+                "chapter_name": row["chapters"]["name"],
+                "revision_type": row["revision_type"],
+                "due_date": row["due_date"]
+            })
+    return revisions
 
 
 def complete_revision(revision_id):
-    c = conn()
-    c.execute("UPDATE revisions SET completed=1 WHERE id=?", (revision_id,))
-    c.commit()
-    c.close()
+    supabase.table("revisions").update({"completed": True}).eq("id", revision_id).execute()
