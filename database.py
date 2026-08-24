@@ -4,7 +4,7 @@ from supabase import create_client, Client
 
 # --- SUPABASE CREDENTIALS ---
 SUPABASE_URL = "https://ryswgudzkbabjuiofrne.supabase.co"
-SUPABASE_KEY = "sb_publishable_fZWSgYIZatoT0TeTwkKw_w_CugLKbR2"
+SUPABASE_KEY = "PASTE_YOUR_COPIED_ANON_KEY_HERE"
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
@@ -24,10 +24,13 @@ def create_user(name, username, password_hash, attempt, articleship):
         "attempt": attempt,
         "articleship": articleship
     }
-    response = supabase.table("users").insert(data).execute()
-    if not response.data:
-        raise ValueError("Failed to create user. Login ID might already exist.")
-    return response.data[0]["id"]
+    
+    try:
+        response = supabase.table("users").insert(data).execute()
+        return response.data[0]["id"]
+    except Exception as e:
+        # This catches the Supabase APIError instead of crashing the app
+        raise ValueError("Failed to create account! This Login ID might already be taken, or the database tables are missing in Supabase.")
 
 
 def authenticate_user(username, raw_password):
